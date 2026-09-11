@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  GitHub Actions から OIDC でこの AWS アカウントに SAM デプロイするための IAM ロール。
+  長期のアクセスキーを GitHub に置かずに済む。1 アカウントにつき 1 回だけ作成する。
+
+  作成後、Outputs の RoleArn を GitHub リポジトリの環境シークレット AWS_ROLE_ARN に設定する。
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: clochetined
+  GitHubRepo:
+    Type: String
+    Default: g-kentei-lab
+  RoleName:
+    Type: String
+    Default: g-kentei-lab-github-deploy
+  CreateOidcProvider:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: アカウントに GitHub の OIDC プロバイダがまだ無ければ true。既にあれば false。
+
+Conditions:
+  CreateProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1]
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # main ブランチからの実行と、staging / production 環境のジョブだけを許可
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:staging
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:production
+      Policies:
+        - PolicyName: sam-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # CloudFormation: このアプリのスタックだけ
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStackResources
+                  - cloudformation:UpdateStack
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                Resource:
+                  - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/g-kentei-lab-api-*/*
+                  - !Sub arn:aws:cloudformation:*:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                Resource:
+                  - arn:aws:cloudformation:*:aws:transform/Serverless-2016-10-31
+              # SAM のデプロイ用 S3 バケット（sam deploy --resolve-s3 が作成・利用）
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketVersioning
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketTagging
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketOwnershipControls
+                Resource:
+                  - arn:aws:s3:::aws-sam-cli-managed-default-*
+                  - arn:aws:s3:::aws-sam-cli-managed-default-*/*
+              # アプリのリソース
+              - Effect: Allow
+                Action:
+                  - lambda:*
+                Resource:
+                  - !Sub arn:aws:lambda:*:${AWS::AccountId}:function:g-kentei-lab-*
+                  - !Sub arn:aws:lambda:*:${AWS::AccountId}:layer:g-kentei-lab-*
+                  - !Sub arn:aws:lambda:*:${AWS::AccountId}:layer:g-kentei-lab-*:*
+              - Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DeleteTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:UpdateTable
+                  - dynamodb:UpdateTimeToLive
+                  - dynamodb:DescribeTimeToLive
+                  - dynamodb:UpdateContinuousBackups
+                  - dynamodb:DescribeContinuousBackups
+                  - dynamodb:TagResource
+                  - dynamodb:UntagResource
+                  - dynamodb:ListTagsOfResource
+                Resource:
+                  - !Sub arn:aws:dynamodb:*:${AWS::AccountId}:table/g-kentei-lab-*
+              - Effect: Allow
+                Action:
+                  - apigateway:*
+                Resource:
+                  - arn:aws:apigateway:*::/apis
+                  - arn:aws:apigateway:*::/apis/*
+                  - arn:aws:apigateway:*::/tags/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
+                  - logs:DeleteRetentionPolicy
+                  - logs:TagLogGroup
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:ListTagsForResource
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:TagResource
+                Resource:
+                  - !Sub arn:aws:cloudwatch:*:${AWS::AccountId}:alarm:g-kentei-lab-*
+              # Lambda の実行ロール（SAM が関数ごとに作成する）
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/g-kentei-lab-api-*
+              - Effect: Allow
+                Action:
+                  - xray:*
+                Resource: "*"
+
+Outputs:
+  RoleArn:
+    Description: GitHub の環境シークレット AWS_ROLE_ARN に設定する値
+    Value: !GetAtt DeployRole.Arn

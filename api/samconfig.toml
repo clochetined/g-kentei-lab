@@ -1,0 +1,31 @@
+version = 0.1
+
+# 共通: `sam build` は arm64 / python3.12 のコンテナ不要（純 Python のため）
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.validate.parameters]
+lint = true
+
+# ---------------------------------------------------------------- staging
+[staging.deploy.parameters]
+stack_name = "g-kentei-lab-api-staging"
+resolve_s3 = true
+s3_prefix = "g-kentei-lab-api-staging"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+parameter_overrides = "Stage=staging AllowedOrigins=https://clochetined.github.io,http://localhost:8000,http://127.0.0.1:8000"
+tags = "app=g-kentei-lab stage=staging"
+
+# ---------------------------------------------------------------- prod
+[prod.deploy.parameters]
+stack_name = "g-kentei-lab-api-prod"
+resolve_s3 = true
+s3_prefix = "g-kentei-lab-api-prod"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+parameter_overrides = "Stage=prod AllowedOrigins=https://clochetined.github.io"
+tags = "app=g-kentei-lab stage=prod"

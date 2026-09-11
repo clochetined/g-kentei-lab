@@ -1,3 +1,6 @@
 src/index.html
 src/check.js
 __pycache__/
+dist/
+.aws-sam/
+.venv/

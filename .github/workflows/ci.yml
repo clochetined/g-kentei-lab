@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  api-test:
+    name: API — lint & unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: api/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: ruff (lint + format check)
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: pytest (moto で DynamoDB をモック)
+        run: pytest
+      - name: cfn-lint (SAM template)
+        run: cfn-lint api/template.yaml infra/github-oidc-role.yaml
+        working-directory: .
+        env:
+          PYTHONUTF8: "1"
+
+  sam-validate:
+    name: API — sam validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+      - run: sam validate --lint --region ap-northeast-1
+        working-directory: api
+
+  site-build:
+    name: Site — build check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build (API URL なしでも動くことを確認)
+        run: |
+          python src/build_pub.py
+          python src/make_standalone.py --out dist/index.html
+          test -s dist/index.html
+      - name: node --check (埋め込み JS の構文)
+        run: |
+          python - <<'PY'
+          import re, io
+          html = io.open("dist/index.html", encoding="utf-8").read()
+          io.open("dist/check.js", "w", encoding="utf-8").write("\n".join(re.findall(r"<script>(.*?)</script>", html, re.S)))
+          PY
+          node --check dist/check.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: dist/index.html

@@ -75,12 +75,14 @@ data = {
         "mock": TREND["mock"],
     },
     "built": "2026-09-11",
+    # 集計・同期 API のベース URL（未設定なら機能は無効のまま静的サイトとして動く）
+    "api": os.environ.get("GK_API_BASE", "").strip().rstrip("/"),
 }
 
 print("questions:", len(questions), Counter(q["cat"] for q in questions))
 print("answer positions:", Counter(q["a"] for q in questions))
 print("neg:", sum(1 for q in questions if q["neg"]))
-print("terms:", len(terms), " notes cats:", len(NOTES))
+print("terms:", len(terms), " notes cats:", len(NOTES), " api:", data["api"] or "(none)")
 
 js = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
 html = read("template_pub.html").replace("/*__DATA__*/null", js)

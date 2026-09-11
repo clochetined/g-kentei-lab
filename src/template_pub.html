@@ -89,6 +89,13 @@ select.sel,input.inp{font:inherit;color:var(--ink);background:var(--surface);bor
 .sec h2{font-size:15px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .kbd{font-family:var(--font-mono);font-size:11px;border:1px solid var(--line-2);border-radius:4px;padding:0 5px;color:var(--ink-3);background:var(--surface)}
+.sync .code{font-family:var(--font-mono);font-size:18px;letter-spacing:.06em;padding:8px 12px;border:1px dashed var(--line-2);border-radius:8px;background:var(--surface-2);display:inline-block;margin:4px 0 8px;user-select:all}
+.sync .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.sync input.inp{flex:1;min-width:180px}
+.sync label{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2);margin-top:12px}
+.sync .msg{font-size:12.5px;margin-top:6px;color:var(--ink-3);min-height:1.2em}
+.sync .msg.err{color:var(--bad)}
+.sync .msg.ok{color:var(--good)}
 
 /* ---------- home ---------- */
 .hero{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:20px;align-items:stretch;margin-bottom:18px}
@@ -245,16 +252,112 @@ const CATS = DATA.cats, CAT = Object.fromEntries(CATS.map(c => [c.id, c.name]));
 const Q = DATA.questions, QI = Object.fromEntries(Q.map(q => [q.id, q]));
 const byCat = {}; CATS.forEach(c => byCat[c.id] = []); Q.forEach(q => byCat[q.cat].push(q));
 const MOCK = DATA.trend.mock;
+const API = (DATA.api || '').replace(/\/$/, '');
 
 /* ---------- state (この端末のみ) ---------- */
 const KEY = 'gk-lab-v1';
-let S = { quiz:{}, terms:{}, mocks:[] };
+let S = { quiz:{}, terms:{}, mocks:[], updatedAt:0, clientId:'', sync:'', share:true };
 try { const raw = localStorage.getItem(KEY); if (raw) S = Object.assign(S, JSON.parse(raw)); } catch(e){}
-function save(){ try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} }
+function uid(n, alphabet){ const a = alphabet || 'abcdefghijklmnopqrstuvwxyz0123456789'; const buf = new Uint8Array(n); if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(buf); else for (let i=0;i<n;i++) buf[i] = Math.random()*256|0; let out = ''; for (let i=0;i<n;i++) out += a[buf[i] % a.length]; return out; }
+if (!S.clientId){ S.clientId = uid(16); }
+function persist(){ try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} }
+function save(){ S.updatedAt = Date.now(); persist(); scheduleSyncPush(); }
+persist();
 const qStat = id => S.quiz[id] || null;
 function catAcc(){ const m = {}; CATS.forEach(c => m[c.id] = { total:0, answered:0, correct:0 }); Q.forEach(q => { const r = m[q.cat]; r.total++; const s = qStat(q.id); if (s){ r.answered++; if (s.r) r.correct++; } }); return m; }
 function shuffle(a){ for (let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
 const fmtTime = s => { s = Math.max(0, Math.round(s)); return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0'); };
+
+/* ---------- API（任意）: 結果の匿名集計と端末間同期 ---------- */
+async function api(path, opts){
+  if (!API) return null;
+  try {
+    const r = await fetch(API + path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
+    if (r.status === 204) return {};
+    const j = await r.json().catch(() => null);
+    if (!r.ok) return { error: (j && j.error) || ('HTTP ' + r.status), status: r.status, body: j };
+    return j;
+  } catch(e){ return { error: String((e && e.message) || e) }; }
+}
+let STATS = null, statsAt = 0, statsLoading = false;
+try { const c = JSON.parse(localStorage.getItem('gk-lab-stats') || 'null'); if (c && c.s){ STATS = c.s; statsAt = c.t || 0; } } catch(e){}
+async function loadStats(force){
+  if (!API || statsLoading) return;
+  if (!force && STATS && Date.now() - statsAt < 5*60*1000) return;
+  statsLoading = true;
+  const s = await api('/v1/stats', force ? { cache: 'no-store' } : undefined);
+  statsLoading = false;
+  if (s && !s.error && s.global){
+    STATS = s; statsAt = Date.now();
+    try { localStorage.setItem('gk-lab-stats', JSON.stringify({ t: statsAt, s })); } catch(e){}
+    if (document.body.dataset.view === 'home') render();
+  }
+}
+function qStatsPill(id){
+  const q = STATS && STATS.questions && STATS.questions[id];
+  if (!q || q.a < 3 || q.pct == null) return '';
+  return '<span class="pill" title="' + q.a + ' 回の回答に基づく">みんなの正答率 ' + q.pct + '%</span>';
+}
+function submitResult(kind, r){
+  if (!API || S.share === false || r.submitted) return;
+  r.submitted = true;
+  const byCat = {}; const answers = [];
+  r.list.forEach(id => { const q = QI[id]; const ok = r.picked[id] === q.a; const c = byCat[q.cat] || (byCat[q.cat] = { n:0, ok:0 }); c.n++; if (ok) c.ok++; answers.push({ id, ok }); });
+  const body = { resultId: uid(20), clientId: S.clientId, kind, n: r.list.length, correct: answers.filter(a => a.ok).length, sec: r.start ? Math.min(86400, Math.round((Date.now() - r.start)/1000)) : 0, byCat, answers };
+  api('/v1/results', { method:'POST', body: JSON.stringify(body) }).then(res => { if (res && !res.error){ statsAt = 0; setTimeout(() => loadStats(true), 1500); } });
+}
+/* 同期: 同期コードを知っている端末どうしで学習記録を共有する */
+const SYNC_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+let syncTimer = null, syncMsg = '';
+function normalizeCode(v){ return String(v || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function fmtCode(c){ return c.replace(/(.{4})(?=.)/g, '$1-'); }
+function snapshot(){ return { quiz: S.quiz, terms: S.terms, mocks: S.mocks }; }
+function scheduleSyncPush(){ if (!API || !S.sync) return; clearTimeout(syncTimer); syncTimer = setTimeout(syncPush, 1500); }
+async function syncPush(){
+  if (!API || !S.sync) return;
+  const res = await api('/v1/progress/' + S.sync, { method:'PUT', body: JSON.stringify({ data: snapshot(), updatedAt: S.updatedAt || 0 }) });
+  if (res && res.status === 409 && res.body && res.body.data){ mergeRemote(res.body.data, res.body.updatedAt); return syncPush(); }
+  if (res && res.error){ setSyncMsg('同期に失敗しました: ' + res.error, 'err'); }
+  else if (res){ setSyncMsg('同期しました（' + new Date().toLocaleTimeString('ja-JP') + '）', 'ok'); }
+}
+function mergeRemote(remote, remoteUpdatedAt){
+  remote = remote || {};
+  const quiz = Object.assign({}, S.quiz);
+  Object.keys(remote.quiz || {}).forEach(id => { const a = quiz[id], b = remote.quiz[id]; if (b && (!a || (b.t || 0) > (a.t || 0))) quiz[id] = b; });
+  const terms = Object.assign({}, S.terms);
+  Object.keys(remote.terms || {}).forEach(id => { terms[id] = Math.max(terms[id] || 0, remote.terms[id] || 0); });
+  const seen = new Set(), mocks = [];
+  (S.mocks || []).concat(remote.mocks || []).forEach(m => { if (!m) return; const k = m.date + '|' + m.sec + '|' + m.pct + '|' + m.n; if (!seen.has(k)){ seen.add(k); mocks.push(m); } });
+  mocks.sort((a, b) => String(a.date + a.sec).localeCompare(String(b.date + b.sec)));
+  S.quiz = quiz; S.terms = terms; S.mocks = mocks.slice(-50);
+  S.updatedAt = Math.max(S.updatedAt || 0, remoteUpdatedAt || 0, Date.now());
+  persist();
+}
+async function syncPull(code){
+  const res = await api('/v1/progress/' + code);
+  if (!res || res.error){ setSyncMsg(res && res.status === 404 ? 'このコードの記録は見つかりません。' : '取得に失敗しました: ' + (res && res.error), 'err'); return false; }
+  mergeRemote(res.data, res.updatedAt); S.sync = code; persist(); await syncPush();
+  syncMsg = 'この端末の記録と統合しました。'; render(); return true;
+}
+function setSyncMsg(m, cls){ syncMsg = m; const el = $('#syncmsg'); if (el){ el.textContent = m; el.className = 'msg ' + (cls || ''); } }
+function syncCard(){
+  if (!API) return '';
+  const on = !!S.sync;
+  return '<div class="card sec sync"><h2>端末間で記録を同期 ' + (on ? '<span class="pill good">同期中</span>' : '<span class="pill">未設定</span>') + '</h2>' +
+    (on ? '<p class="note" style="margin:0 0 6px">下のコードを他の端末で入力すると、同じ学習記録を共有できます。コードは秘密にしてください。</p><div class="code" id="synccode">' + esc(fmtCode(S.sync)) + '</div><div class="row"><button class="btn sm" data-act="sync-copy">コードをコピー</button><button class="btn sm" data-act="sync-now">今すぐ同期</button><button class="btn sm ghost" data-act="sync-off">この端末の同期を解除</button></div>'
+        : '<p class="note" style="margin:0 0 6px">アカウント登録なしで、スマホとPCなど複数の端末で記録を共有できます。</p><div class="row"><button class="btn pri sm" data-act="sync-new">新しい同期コードを発行</button></div><div class="row"><input class="inp" id="syncin" placeholder="他の端末のコードを入力（例: abcd-2345-…）" autocomplete="off"><button class="btn sm" data-act="sync-join">このコードで復元</button></div>') +
+    '<div class="msg" id="syncmsg">' + esc(syncMsg) + '</div>' +
+    '<label><input type="checkbox" id="sharechk"' + (S.share === false ? '' : ' checked') + '> 演習結果を匿名の統計（みんなの正答率）に送信する</label></div>';
+}
+function communityCard(){
+  if (!API) return '';
+  const g = STATS && STATS.global;
+  const inner = !g ? '<div class="empty" style="padding:16px">' + (statsLoading || !STATS ? '集計を読み込み中…' : '集計はまだありません') + '</div>'
+    : '<div class="stats" style="grid-template-rows:none;grid-template-columns:1fr 1fr;margin-bottom:12px"><div class="card stat"><div class="lab"><span>模擬試験の受験回数</span></div><div class="val">' + g.mockCount + '<small>回</small></div></div><div class="card stat"><div class="lab"><span>模試の平均スコア</span></div><div class="val">' + (g.mockAvgPct == null ? '–' : g.mockAvgPct) + '<small>%</small></div></div></div>' +
+      '<div class="share">' + CATS.filter(c => STATS.cats && STATS.cats[c.id]).map(c => { const x = STATS.cats[c.id]; return '<div class="row"><div>' + esc(c.name) + '</div><div class="bar"><i class="' + (x.pct>=70?'good':'') + '" style="width:' + (x.pct||0) + '%"></i></div><div class="r num">' + (x.pct==null?'–':x.pct+'%') + '</div></div>'; }).join('') + '</div>' +
+      '<p class="note" style="margin:10px 0 0">全利用者の回答 ' + Number(g.answered||0).toLocaleString() + ' 件から算出。演習の解説にも各問題の「みんなの正答率」が表示されます。</p>';
+  return '<div class="card sec"><h2>みんなの記録 <span class="eyebrow">community</span></h2>' + inner + '</div>';
+}
 
 /* ---------- routing ---------- */
 const NAV = [['#/', 'home', 'ホーム'], ['#/practice', 'practice', '分野別演習'], ['#/mock', 'mock', '模擬試験'], ['#/notes', 'notes', '要点整理'], ['#/terms', 'terms', '用語集']];
@@ -285,6 +388,7 @@ function viewHome(){
       '</div><p class="note">「不適切なものを選ぶ」問題は読み違えが失点の原因になりやすいため、本サイトでも ' + Q.filter(q => q.neg).length + ' 問（約' + Math.round(Q.filter(q => q.neg).length/Q.length*100) + '%）をこの形式にし、問題文に目印を付けています。</p></div>' +
     '</div>' +
     '<div class="card sec" style="margin-bottom:14px"><h2>よく出るテーマ</h2><ul class="themes">' + t.themes.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul></div>' +
+    (API ? '<div class="grid2" style="margin-bottom:14px">' + communityCard() + syncCard() + '</div>' : '') +
     '<div class="card sec"><h2>分野から選ぶ</h2><div class="catlist">' + CATS.map(c => { const r = acc[c.id]; const pct = r.answered ? Math.round(r.correct/r.answered*100) : 0;
       return '<a href="#/practice/cat/' + c.id + '"><b>' + esc(c.name) + '</b><span class="n">' + r.total + '問' + (r.answered ? ' · ' + pct + '%' : '') + '</span><span class="d">' + esc(c.desc) + '</span><div class="bar"><i class="' + (pct>=70?'good':'') + '" style="width:' + (r.answered ? Math.round(r.answered/r.total*100) : 0) + '%"></i></div></a>'; }).join('') + '</div></div>';
 }
@@ -301,7 +405,8 @@ function viewPractice(mode, arg){
     else if (mode === 'cat'){ list = shuffle(byCat[arg] ? byCat[arg].map(q => q.id) : []); title = CAT[arg] || '分野別'; }
     else if (mode === 'q'){ list = QI[arg] ? [arg] : []; title = '1問だけ'; }
     if (!list.length) return '<div class="page-h"><div><div class="eyebrow">Practice</div><h1>' + esc(title) + '</h1></div></div><div class="card empty">該当する問題がありません。<br><a href="#/practice">演習メニューに戻る</a></div>';
-    run = { kind:'practice', list, i:0, picked:{}, title };
+    run = { kind:'practice', list, i:0, picked:{}, title, start: Date.now() };
+    loadStats();
   }
   return runView();
 }
@@ -337,6 +442,7 @@ function startMock(){
   shuffle(list);
   const now = Date.now();
   run = { kind:'mock', list, i:0, picked:{}, title:'模擬試験', start: now, deadline: now + MOCK.minutes*60*1000, done:false };
+  loadStats();
   tickTimer();
 }
 let timerHandle = null;
@@ -361,12 +467,13 @@ function finishMock(){
   S.mocks.push({ date, n: rows.length, correct, pct, sec: Math.round((Date.now() - run.start)/1000), byC });
   if (S.mocks.length > 50) S.mocks = S.mocks.slice(-50);
   save();
+  submitResult('mock', run);
 }
 function runView(){
   const r = run;
   const isMock = r.kind === 'mock';
   if (isMock && r.done) return mockResult();
-  if (!isMock && r.i >= r.list.length) return practiceResult();
+  if (!isMock && r.i >= r.list.length){ submitResult('practice', r); return practiceResult(); }
   const id = r.list[r.i], q = QI[id];
   const picked = r.picked[id];
   const answered = picked != null;
@@ -379,7 +486,7 @@ function runView(){
     '<div class="qt">' + qtext + '</div>' +
     '<div class="choices">' + q.c.map((c, i) => { let cls = 'choice'; if (showAns){ if (i === q.a) cls += ' correct'; else if (i === picked) cls += ' wrong'; } else if (isMock && i === picked) cls += ' picked';
       return '<button class="' + cls + '" data-pick="' + i + '"' + (showAns ? ' disabled' : '') + '><span class="m">' + MARK[i] + '</span><span>' + esc(c) + '</span></button>'; }).join('') + '</div>' +
-    (showAns ? '<div class="exp"><div class="r ' + (picked === q.a ? 'ok' : 'ng') + '">' + (picked === q.a ? '正解' : '不正解 — 正解は選択肢 ' + MARK[q.a]) + '</div><p>' + esc(q.e) + '</p></div>' : '') +
+    (showAns ? '<div class="exp"><div class="r ' + (picked === q.a ? 'ok' : 'ng') + '">' + (picked === q.a ? '正解' : '不正解 — 正解は選択肢 ' + MARK[q.a]) + ' ' + qStatsPill(q.id) + '</div><p>' + esc(q.e) + '</p></div>' : '') +
     '</div>' +
     '<div class="actions">' +
       (isMock ? '<button class="btn sm" data-act="prev"' + (r.i === 0 ? ' disabled' : '') + '>← 前の問題</button>' : '<span class="muted" style="font-size:12.5px">' + (showAns ? '' : 'キー <span class="kbd">1</span>–<span class="kbd">4</span> でも選べます') + '</span>') +
@@ -404,7 +511,7 @@ function mockResult(){
     '<div class="share" style="margin-top:16px">' + CATS.filter(c => m.byC[c.id]).map(c => { const x = m.byC[c.id]; const p = Math.round(x.ok/x.n*100); return '<div class="row"><div>' + esc(c.name) + '</div><div class="bar"><i class="' + (p>=70?'good':'') + '" style="width:' + p + '%"></i></div><div class="r num">' + x.ok + '/' + x.n + '</div></div>'; }).join('') + '</div>' +
     '<div class="actions" style="display:flex;gap:10px;margin-top:20px;flex-wrap:wrap"><a class="btn pri" href="#/mock/run" data-reset="1">もう一度受ける</a><a class="btn ghost" href="#/mock">模擬試験トップ</a></div></div>' +
     '<h2 style="font-size:16px;margin:24px 0 10px">解答と解説</h2>' +
-    rows.map((x, i) => '<div class="card qcard" style="margin-bottom:10px"><div class="qh"><span class="qn">' + (i+1) + ' · ' + esc(CAT[x.q.cat]) + '</span><span class="pill ' + (x.ok ? 'good' : 'bad') + '">' + (x.ok ? '正解' : (x.p == null ? '未回答' : '不正解')) + '</span></div><div class="qt" style="font-size:15px;margin-bottom:12px">' + esc(x.q.q) + '</div><div class="choices">' + x.q.c.map((c, j) => '<div class="choice' + (j === x.q.a ? ' correct' : (j === x.p ? ' wrong' : '')) + '"><span class="m">' + MARK[j] + '</span><span>' + esc(c) + '</span></div>').join('') + '</div><div class="exp"><p>' + esc(x.q.e) + '</p></div></div>').join('') +
+    rows.map((x, i) => '<div class="card qcard" style="margin-bottom:10px"><div class="qh"><span class="qn">' + (i+1) + ' · ' + esc(CAT[x.q.cat]) + '</span><span class="pill ' + (x.ok ? 'good' : 'bad') + '">' + (x.ok ? '正解' : (x.p == null ? '未回答' : '不正解')) + '</span>' + qStatsPill(x.q.id) + '</div><div class="qt" style="font-size:15px;margin-bottom:12px">' + esc(x.q.q) + '</div><div class="choices">' + x.q.c.map((c, j) => '<div class="choice' + (j === x.q.a ? ' correct' : (j === x.p ? ' wrong' : '')) + '"><span class="m">' + MARK[j] + '</span><span>' + esc(c) + '</span></div>').join('') + '</div><div class="exp"><p>' + esc(x.q.e) + '</p></div></div>').join('') +
   '</div>';
 }
 function pick(i){
@@ -462,8 +569,8 @@ function render(){
   else if (r.top === 'mock') main.innerHTML = viewMock(r.a);
   else if (r.top === 'notes') main.innerHTML = viewNotes(r.a);
   else if (r.top === 'terms') main.innerHTML = viewTerms(r.a, r.b);
-  else main.innerHTML = viewHome();
-  $('#ftr').innerHTML = 'G検定 模試ラボ — 問題・解説・要点・用語はすべて本サイトのオリジナルです（AIが作成し、公式試験問題や市販書籍の転載は含みません）。内容は' + esc(DATA.built) + '時点の知識に基づき、法令や制度は変更される場合があります。最終的な確認は JDLA のシラバスと一次情報で行ってください。学習記録はこのブラウザ内にのみ保存されます。';
+  else { main.innerHTML = viewHome(); loadStats(); }
+  $('#ftr').innerHTML = 'G検定 模試ラボ — 問題・解説・要点・用語はすべて本サイトのオリジナルです（AIが作成し、公式試験問題や市販書籍の転載は含みません）。内容は' + esc(DATA.built) + '時点の知識に基づき、法令や制度は変更される場合があります。最終的な確認は JDLA のシラバスと一次情報で行ってください。' + (API ? '学習記録はこのブラウザに保存され、同期コードを発行した場合のみサーバにも保存されます。演習結果は設定に応じて匿名の統計として集計されます。' : '学習記録はこのブラウザ内にのみ保存されます。');
 }
 document.addEventListener('click', e => {
   const go = e.target.closest('[data-go]'); if (go){ location.hash = go.dataset.go; return; }
@@ -478,6 +585,11 @@ document.addEventListener('click', e => {
   else if (a === 'fc-flip'){ fc.open = !fc.open; render(); }
   else if (a === 'fc-still' || a === 'fc-got'){ const id = fc.order[fc.i]; if (!id) return; S.terms[id] = a === 'fc-got' ? 2 : 1; save(); fc.order.splice(fc.i, 1); if (fc.i >= fc.order.length) fc.i = 0; fc.open = false; render(); }
   else if (a === 'fc-reset'){ DATA.terms.forEach(t => { delete S.terms[t.id]; }); save(); fcRebuild(); render(); }
+  else if (a === 'sync-new'){ S.sync = uid(16, SYNC_ALPHABET); S.updatedAt = S.updatedAt || Date.now(); persist(); syncMsg = 'コードを発行しました。'; render(); syncPush(); }
+  else if (a === 'sync-join'){ const code = normalizeCode(($('#syncin') || {}).value); if (code.length < 12){ setSyncMsg('コードは12文字以上の英数字です。', 'err'); return; } act.disabled = true; syncPull(code).then(ok => { if (!ok) act.disabled = false; }); }
+  else if (a === 'sync-now'){ setSyncMsg('同期しています…'); syncPush(); }
+  else if (a === 'sync-copy'){ const c = fmtCode(S.sync); (navigator.clipboard ? navigator.clipboard.writeText(c) : Promise.reject()).then(() => setSyncMsg('コピーしました。', 'ok'), () => setSyncMsg('コピーできませんでした。コードを選択して手動でコピーしてください。', 'err')); }
+  else if (a === 'sync-off'){ S.sync = ''; persist(); syncMsg = 'この端末の同期を解除しました（サーバ上の記録は残ります）。'; render(); }
 });
 document.addEventListener('input', e => {
   if (e.target.id === 'termq'){ termQ = e.target.value; const pos = e.target.selectionStart; render(); const el = $('#termq'); if (el){ el.focus(); try { el.setSelectionRange(pos, pos); } catch(x){} } }
@@ -486,9 +598,10 @@ document.addEventListener('change', e => {
   if (e.target.id === 'termcat'){ termCat = e.target.value; render(); }
   else if (e.target.id === 'fccat'){ termCat = e.target.value; fcRebuild(); render(); }
   else if (e.target.id === 'nsel'){ location.hash = '#/notes/' + e.target.value; }
+  else if (e.target.id === 'sharechk'){ S.share = !!e.target.checked; persist(); }
 });
 document.addEventListener('keydown', e => {
-  if (e.target.matches('input,select,textarea')) return;
+  if (e.target && e.target.matches && e.target.matches('input,select,textarea')) return;
   const v = document.body.dataset.view;
   if ((v === 'practice' || v === 'mock') && run && !run.done){
     if (/^[1-4]$/.test(e.key)){ const id = run.list[run.i]; if (run.kind === 'mock' || run.picked[id] == null) pick(parseInt(e.key, 10) - 1); }

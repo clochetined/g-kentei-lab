@@ -1,0 +1,239 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  G検定 模試ラボ API — 学習記録の端末間同期と、演習結果の匿名集計。
+  DynamoDB (single table) + Lambda (Python 3.12, arm64) + API Gateway HTTP API。
+
+Parameters:
+  Stage:
+    Type: String
+    AllowedValues: [staging, prod]
+    Default: staging
+    Description: デプロイ環境。リソース名と保持ポリシーに反映される。
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: "https://clochetined.github.io,http://localhost:8000"
+    Description: CORS で許可するオリジン（カンマ区切り）。
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]
+    MemorySize: 256
+    Timeout: 10
+    Tracing: Active
+    Layers:
+      - !Ref CommonLayer
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref Table
+        STAGE: !Ref Stage
+        POWERTOOLS_SERVICE_NAME: g-kentei-lab-api
+  HttpApi:
+    CorsConfiguration:
+      AllowOrigins: !Ref AllowedOrigins
+      AllowMethods: [GET, PUT, POST, DELETE, OPTIONS]
+      AllowHeaders: [Content-Type]
+      MaxAge: 600
+
+Resources:
+  # ---------------------------------------------------------------- data
+  Table:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      TableName: !Sub g-kentei-lab-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: app
+          Value: g-kentei-lab
+        - Key: stage
+          Value: !Ref Stage
+
+  # ---------------------------------------------------------------- shared code
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub g-kentei-lab-common-${Stage}
+      Description: 共通ユーティリティ (gk_common)
+      ContentUri: layer/
+      CompatibleRuntimes: [python3.12]
+      CompatibleArchitectures: [arm64]
+      RetentionPolicy: Delete
+
+  # ---------------------------------------------------------------- api
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime",
+          "method":"$context.httpMethod","path":"$context.path","status":"$context.status",
+          "latency":"$context.responseLatency","integrationError":"$context.integrationErrorMessage"}
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 25
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/g-kentei-lab-${Stage}
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ---------------------------------------------------------------- functions
+  ProgressFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub g-kentei-lab-${Stage}-progress
+      CodeUri: functions/progress/
+      Handler: app.handler
+      Description: 学習記録の同期 (GET/PUT/DELETE /v1/progress/{syncKey})
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+      Events:
+        Get:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /v1/progress/{syncKey}
+            Method: GET
+        Put:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /v1/progress/{syncKey}
+            Method: PUT
+        Delete:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /v1/progress/{syncKey}
+            Method: DELETE
+
+  ProgressLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProgressFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  ResultsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub g-kentei-lab-${Stage}-results
+      CodeUri: functions/results/
+      Handler: app.handler
+      Description: 結果の登録と集計更新 (POST /v1/results)
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+      Events:
+        Post:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /v1/results
+            Method: POST
+
+  ResultsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ResultsFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  StatsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub g-kentei-lab-${Stage}-stats
+      CodeUri: functions/stats/
+      Handler: app.handler
+      Description: 集計の読み出し (GET /v1/stats, /v1/health)
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref Table
+      Events:
+        Stats:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /v1/stats
+            Method: GET
+        Health:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /v1/health
+            Method: GET
+
+  StatsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${StatsFunction}
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ---------------------------------------------------------------- monitoring
+  Api5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub g-kentei-lab-${Stage}-api-5xx
+      AlarmDescription: API が 5 分間に 5 回以上 5xx を返した
+      Namespace: AWS/ApiGateway
+      MetricName: 5xx
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref Api
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  LambdaErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub g-kentei-lab-${Stage}-lambda-errors
+      AlarmDescription: いずれかの Lambda が 5 分間に 5 回以上エラー
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  ApiUrl:
+    Description: API のベース URL（末尾スラッシュなし）
+    Value: !Sub https://${Api}.execute-api.${AWS::Region}.amazonaws.com
+  TableName:
+    Value: !Ref Table
+  Stage:
+    Value: !Ref Stage
