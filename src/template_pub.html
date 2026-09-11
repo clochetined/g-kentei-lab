@@ -147,7 +147,7 @@ select.sel,input.inp{font:inherit;color:var(--ink);background:var(--surface);bor
 .qcard .qt b{color:var(--bad);font-weight:700}
 .choices{display:flex;flex-direction:column;gap:8px}
 .choice{display:grid;grid-template-columns:30px 1fr;gap:10px;align-items:start;padding:11px 14px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);text-align:left;line-height:1.65;transition:background .12s,border-color .12s}
-.choice .m{font-family:var(--font-mono);color:var(--ink-3);font-size:13px;padding-top:2px}
+.choice .m{font-family:var(--font-mono);color:var(--ink-3);font-size:12px;font-weight:600;width:24px;height:24px;border-radius:50%;border:1.5px solid currentColor;display:flex;align-items:center;justify-content:center;margin-top:1px}
 .choice:hover{border-color:var(--accent);background:var(--accent-soft)}
 .choice[disabled]{cursor:default}
 .choice[disabled]:hover{background:var(--surface);border-color:var(--line-2)}
@@ -240,7 +240,7 @@ select.sel,input.inp{font:inherit;color:var(--ink);background:var(--surface);bor
 'use strict';
 const $ = (s, el) => (el||document).querySelector(s);
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const MARK = ['①','②','③','④'];
+const MARK = ['1','2','3','4'];
 const CATS = DATA.cats, CAT = Object.fromEntries(CATS.map(c => [c.id, c.name]));
 const Q = DATA.questions, QI = Object.fromEntries(Q.map(q => [q.id, q]));
 const byCat = {}; CATS.forEach(c => byCat[c.id] = []); Q.forEach(q => byCat[q.cat].push(q));
@@ -379,7 +379,7 @@ function runView(){
     '<div class="qt">' + qtext + '</div>' +
     '<div class="choices">' + q.c.map((c, i) => { let cls = 'choice'; if (showAns){ if (i === q.a) cls += ' correct'; else if (i === picked) cls += ' wrong'; } else if (isMock && i === picked) cls += ' picked';
       return '<button class="' + cls + '" data-pick="' + i + '"' + (showAns ? ' disabled' : '') + '><span class="m">' + MARK[i] + '</span><span>' + esc(c) + '</span></button>'; }).join('') + '</div>' +
-    (showAns ? '<div class="exp"><div class="r ' + (picked === q.a ? 'ok' : 'ng') + '">' + (picked === q.a ? '正解' : '不正解 — 正解は ' + MARK[q.a]) + '</div><p>' + esc(q.e) + '</p></div>' : '') +
+    (showAns ? '<div class="exp"><div class="r ' + (picked === q.a ? 'ok' : 'ng') + '">' + (picked === q.a ? '正解' : '不正解 — 正解は選択肢 ' + MARK[q.a]) + '</div><p>' + esc(q.e) + '</p></div>' : '') +
     '</div>' +
     '<div class="actions">' +
       (isMock ? '<button class="btn sm" data-act="prev"' + (r.i === 0 ? ' disabled' : '') + '>← 前の問題</button>' : '<span class="muted" style="font-size:12.5px">' + (showAns ? '' : 'キー <span class="kbd">1</span>–<span class="kbd">4</span> でも選べます') + '</span>') +
